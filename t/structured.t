@@ -1,9 +1,9 @@
 use strict;
 use warnings;
-use Test::More tests => 18;
+use Test::More tests => 38;
 use Moose::Util::TypeConstraints;
-use MooseX::Types::Moose qw/Defined Object Maybe Str Int/;
-use MooseX::Types::Structured qw/Dict Tuple Optional/;
+use MooseX::Types::Moose qw/Defined Object Maybe Str Int ArrayRef HashRef/;
+use MooseX::Types::Structured qw/Dict Tuple Optional slurpy/;
 use MooseX::Method::Signatures;
 
 my $o = bless {}, 'Class';
@@ -86,3 +86,85 @@ my $o = bless {}, 'Class';
     };
     ok($@);
 }
+
+{ # ($foo, %rest)
+    my $meth = method ($foo, %rest) {
+        $rest{bar} ||= 'default';
+        return "${\ref $self} ${foo} $rest{bar}";
+    };
+
+    my $expected = Tuple[Tuple[Object,Defined,slurpy ArrayRef[Defined]], Dict[]];
+    is($meth->type_constraint->name, $expected->name);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar'), 'Class foo bar');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo'), 'Class foo default');
+    };
+    ok(!$@);
+
+    eval {
+        $o->${\$meth->body}();
+    };
+    ok($@);
+}
+
+{ # ($foo :$bar)
+    my $meth = method ($foo, :$bar) {
+        $bar ||= 'default';
+        return "${\ref $self} ${foo} ${bar}";
+    };
+
+    my $expected = Tuple[Tuple[Object,Defined], Dict[bar=>Optional[Defined]]];
+    is($meth->type_constraint->name, $expected->name);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar'), 'Class foo bar');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo'), 'Class foo default');
+    };
+    ok(!$@);
+
+    eval {
+        $o->${\$meth->body}();
+    };
+    ok($@);
+}
+
+{ # ($foo, %rest, :$bar)
+    my $meth = method ($foo, %rest, :$bar) {
+        $rest{baz} ||= 'default';
+        $bar ||= 'default';
+        return "${\ref $self} ${foo} ${bar} $rest{baz}";
+    };
+
+    my $expected = Tuple[Tuple[Object,Defined], Dict[bar=>Optional[Defined]], HashRef];
+    is($meth->type_constraint->name, $expected->name);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar', 'baz' => 'baz'), 'Class foo bar baz');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar'), 'Class foo bar default');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo'), 'Class foo default default');
+    };
+    ok(!$@);
+
+    eval {
+        $o->${\$meth->body}();
+    };
+    ok($@);
+}
+

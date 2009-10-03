@@ -11,7 +11,7 @@ use Moose::Util::TypeConstraints;
 use MooseX::Meta::TypeConstraint::ForceCoercion;
 use MooseX::Types::Util qw/has_available_type_export/;
 use MooseX::Types::Structured qw/Tuple Dict Optional slurpy/;
-use MooseX::Types::Moose qw/ArrayRef Str Maybe Object Defined CodeRef Bool/;
+use MooseX::Types::Moose qw/HashRef ArrayRef Str Maybe Object Defined CodeRef Bool/;
 use MooseX::Method::Signatures::Types qw/Injections Params/;
 use aliased 'Parse::Method::Signatures::Param::Named';
 use aliased 'Parse::Method::Signatures::Param::Placeholder';
@@ -68,6 +68,11 @@ has _named_args => (
 );
 
 has _has_slurpy_positional => (
+    is   => 'rw',
+    isa  => Bool,
+);
+
+has _has_slurpy_named => (
     is   => 'rw',
     isa  => Bool,
 );
@@ -251,6 +256,8 @@ sub _param_to_spec {
     }
 
     my %spec;
+
+    $spec{sigil} = $param->sigil;
     if ($param->sigil ne '$') {
         $spec{slurpy} = 1;
         $tc = slurpy ArrayRef[$tc];
@@ -310,12 +317,20 @@ sub _build__lexicals {
         ? $sig->invocant->variable_name
         : '$self';
 
+    my (@positional_params, @slurpy_named_param);
+    if ($sig->has_positional_params) {
+        @positional_params = $sig->positional_params;
+        push @slurpy_named_param, pop @positional_params
+            if $self->_has_slurpy_named;
+    }
+
     push @lexicals,
         (does_role($_, Placeholder)
             ? 'undef'
             : $_->variable_name)
-        for (($sig->has_positional_params ? $sig->positional_params : ()),
-             ($sig->has_named_params      ? $sig->named_params      : ()));
+        for (@positional_params,
+             ($sig->has_named_params      ? $sig->named_params      : ()),
+             @slurpy_named_param);
 
     return \@lexicals;
 }
@@ -345,9 +360,15 @@ sub _build__positional_args {
     if ($sig->has_positional_params) {
         for my $param ($sig->positional_params) {
             my $spec = $self->_param_to_spec($param);
-            $slurpy ||= 1 if $spec->{slurpy};
+            ++$slurpy if $spec->{slurpy};
             push @positional, $spec;
         }
+    }
+
+    if ($slurpy == 1 and $sig->has_named_params and $positional[-1]->{sigil} eq '%') {
+        $slurpy = 0;
+        pop @positional;
+        $self->_has_slurpy_named(1);
     }
 
     $self->_has_slurpy_positional($slurpy);
@@ -380,10 +401,16 @@ sub _build_type_constraint {
     my ($self) = @_;
     my ($positional, $named) = map { $self->$_ } map { "_${_}_args" } qw/positional named/;
 
-    my $tc = Tuple[
-        Tuple[ map { $_->{tc}               } @{ $positional } ],
-        Dict[  map { ref $_ ? $_->{tc} : $_ } @{ $named      } ],
-    ];
+    my $tc = $self->_has_slurpy_named
+        ? Tuple[
+            Tuple[ map { $_->{tc}               } @{ $positional } ],
+            Dict[  map { ref $_ ? $_->{tc} : $_ } @{ $named      } ],
+            HashRef,
+        ]
+        : Tuple[
+            Tuple[ map { $_->{tc}               } @{ $positional } ],
+            Dict[  map { ref $_ ? $_->{tc} : $_ } @{ $named      } ],
+        ];
 
     my $coerce_param = sub {
         my ($spec, $value) = @_;
@@ -396,7 +423,7 @@ sub _build_type_constraint {
     coerce $tc,
         from ArrayRef,
         via {
-            my (@positional_args, %named_args);
+            my (@positional_args, %named_args, @slurpy_named);
 
             my $i = 0;
             for my $param (@{ $positional }) {
@@ -424,11 +451,20 @@ sub _build_type_constraint {
                         }
                     }
 
-                    @named_args{keys %rest} = values %rest;
+
+                    if ($self->_has_slurpy_named) {
+                        @slurpy_named = (\%rest);
+                    }
+                    else {
+                        @named_args{keys %rest} = values %rest;
+                    }
+                }
+                elsif ($self->_has_slurpy_named) {
+                    @slurpy_named = ({});
                 }
             }
 
-            return [\@positional_args, \%named_args];
+            return [\@positional_args, \%named_args, @slurpy_named];
         };
 
     return MooseX::Meta::TypeConstraint::ForceCoercion->new(
@@ -446,7 +482,7 @@ sub validate {
         confess $msg;
     }
 
-    return @{ $coerced->[0] }, map { $coerced->[1]->{$_} } @named;
+    return @{ $coerced->[0] }, (map { $coerced->[1]->{$_} } @named), %{ $coerced->[2] || {} };
 }
 
 __PACKAGE__->meta->make_immutable;
