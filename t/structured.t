@@ -1,9 +1,9 @@
 use strict;
 use warnings;
-use Test::More tests => 18;
+use Test::More tests => 26;
 use Moose::Util::TypeConstraints;
-use MooseX::Types::Moose qw/Any Object Maybe Str Int/;
-use MooseX::Types::Structured qw/Dict Tuple Optional/;
+use MooseX::Types::Moose qw/Any Object Maybe Str Int HashRef/;
+use MooseX::Types::Structured qw/Dict Tuple Optional slurpy/;
 use MooseX::Method::Signatures;
 
 my $o = bless {}, 'Class';
@@ -86,3 +86,34 @@ my $o = bless {}, 'Class';
     };
     ok($@);
 }
+{ # ($foo, :$bar, :%rest)
+    my $meth = method ($foo, :$bar, :%rest) {
+        $rest{baz} ||= 'default';
+        $bar ||= 'default';
+        return "${\ref $self} ${foo} ${bar} $rest{baz}";
+    };
+
+    my $expected = Tuple[Tuple[Object,Any], Dict[bar=>Optional[Any],slurpy HashRef[Any]]];
+    is($meth->type_constraint->name, $expected->name);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar', 'baz' => 'baz'), 'Class foo bar baz');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo', 'bar' => 'bar'), 'Class foo bar default');
+    };
+    ok(!$@);
+
+    eval {
+        is($o->${\$meth->body}('foo'), 'Class foo default default');
+    };
+    ok(!$@);
+
+    eval {
+        $o->${\$meth->body}();
+    };
+    ok($@);
+}
+

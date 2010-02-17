@@ -11,7 +11,7 @@ use Moose::Util::TypeConstraints;
 use MooseX::Meta::TypeConstraint::ForceCoercion;
 use MooseX::Types::Util qw/has_available_type_export/;
 use MooseX::Types::Structured qw/Tuple Dict Optional slurpy/;
-use MooseX::Types::Moose qw/ArrayRef Str Maybe Object Any CodeRef Bool/;
+use MooseX::Types::Moose qw/HashRef ArrayRef Str Maybe Object Any CodeRef Bool/;
 use MooseX::Method::Signatures::Types qw/Injections Params/;
 use aliased 'Parse::Method::Signatures::Param::Named';
 use aliased 'Parse::Method::Signatures::Param::Placeholder';
@@ -253,10 +253,12 @@ sub _param_to_spec {
     my %spec;
     if ($param->sigil ne '$') {
         $spec{slurpy} = 1;
-        $tc = slurpy ArrayRef[$tc];
+        $tc = does_role($param, Named)
+          ? slurpy HashRef[$tc]
+          : slurpy ArrayRef[$tc];
     }
 
-    $spec{tc} = $param->required
+    $spec{tc} = ($param->required || $spec{slurpy})
         ? $tc
         : Optional[$tc];
 
@@ -378,9 +380,14 @@ sub _build_type_constraint {
     my ($self) = @_;
     my ($positional, $named) = map { $self->$_ } map { "_${_}_args" } qw/positional named/;
 
+    my $slurpy_name;
+    my @named = @$named;
+
+    ($slurpy_name) = splice(@named,-2,1) if @named and $named[-1]->{slurpy};
+
     my $tc = Tuple[
         Tuple[ map { $_->{tc}               } @{ $positional } ],
-        Dict[  map { ref $_ ? $_->{tc} : $_ } @{ $named      } ],
+        Dict[  map { ref $_ ? $_->{tc} : $_ }    @named        ],
     ];
 
     my $coerce_param = sub {
@@ -390,6 +397,8 @@ sub _build_type_constraint {
     };
 
     my %named = @{ $named };
+    my $slurpy_spec;
+    $slurpy_spec = delete $named{$slurpy_name} if $slurpy_name;
 
     coerce $tc,
         from ArrayRef,
@@ -405,7 +414,7 @@ sub _build_type_constraint {
                 $i++;
             }
 
-            if (%named) {
+            if (%named || $slurpy_spec) {
                 my @rest = @{ $_ }[$i .. $#{ $_ }];
                 confess "Expected named arguments but didn't find an even-sized list"
                     unless @rest % 2 == 0;
@@ -422,7 +431,15 @@ sub _build_type_constraint {
                     }
                 }
 
-                @named_args{keys %rest} = values %rest;
+                if ($slurpy_spec) {
+                    $named_args{$slurpy_name} = \%rest;
+                    foreach my $value (values %rest) {
+                        $value = $coerce_param->($slurpy_spec, $value);
+                    }
+                }
+                else {
+                    @named_args{keys %rest} = values %rest;
+                }
             }
             elsif ($#{ $_ } >= $i) {
                 push @positional_args, @{ $_ }[$i .. $#{ $_ }];
@@ -439,14 +456,21 @@ sub _build_type_constraint {
 sub validate {
     my ($self, $args) = @_;
 
-    my @named = grep { !ref $_ } @{ $self->_named_args };
+    my $named = $self->_named_args;
+    my @named = grep { !ref $_ } @{ $named };
+    my @slurpy_named;
+
+    push @slurpy_named, pop @named
+      if @named && $named->[-1]->{slurpy};
 
     my $coerced;
     if (defined (my $msg = $self->type_constraint->validate($args, \$coerced))) {
         confess $msg;
     }
 
-    return @{ $coerced->[0] }, map { $coerced->[1]->{$_} } @named;
+    return @{ $coerced->[0] },
+        (map {   $coerced->[1]->{$_}  } @named       ),
+        (map { %{$coerced->[1]->{$_}} } @slurpy_named);
 }
 
 __PACKAGE__->meta->make_immutable;
